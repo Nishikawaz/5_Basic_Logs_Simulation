@@ -1,104 +1,96 @@
-import argparse
-import random
-import time
-from datetime import datetime, timezone
-
 import requests
+import random
+from datetime import datetime
 
-# --- CONFIGURACION ---
-URL = "http://127.0.0.1:5000/logs"
+# Definimos la URL de nuestra API local, apuntando al endpoint '/logs' y al puerto 6869 que configuramos en Flask
+URL_SERVIDOR = "http://localhost:6869/logs"
 
-# Tokens que coinciden con la lista manual del servidor.
-SERVICIOS = {
-    "servicio01": "token_a",
-    "servicio02": "token_b",
-    "servicio03": "token_c",
+# Token único por servicio - Diccionario que aloja el tipo de servicio con el token de autorización correspondiente
+TOKENS = {
+    "Registro":      "TOKEN_servicio_A",
+    "Autenticacion": "TOKEN_servicio_B",
+    "Pagos":         "TOKEN_servicio_C",
 }
 
-SEVERIDADES = ["INFO", "DEBUG", "WARNING", "ERROR", "FATAL"]
-MENSAJES = {
-    "servicio01": [
-        "Usuario hizo login exitoso.",
-        "Token vencido mientras alguien juraba que funcionaba ayer.",
-        "Intento de login bloqueado por demasiados errores seguidos.",
+# Mensajes por servicio - Diccionario con Registro | Mensajes simulando interacciones
+MENSAJES_POR_SERVICIO = {
+    "Registro": [
+        "Usuario registrado exitosamente",
+        "El email ya estaba en uso",
+        "Fallo al enviar correo de confirmación",
+        "Registro completado pero sin foto de perfil (clásico)",
     ],
-    "servicio02": [
-        "Meme mal rankeado detectado en cache.",
-        "Catalogo sincronizado sin incidentes visibles.",
-        "Busqueda devolvio cero resultados y una mirada incomoda.",
+    "Autenticacion": [
+        "Usuario logueado exitosamente",
+        "Contraseña incorrecta — tercer intento",
+        "Token de sesión expirado",
+        "Login bloqueado por demasiados intentos fallidos",
     ],
-    "servicio03": [
-        "Timeout esperando respuesta de la pasarela de pago.",
-        "Pago aprobado por el procesador externo.",
-        "Fallo al conectar con la base de datos principal.",
+    "Pagos": [
+        "Transacción completada exitosamente",
+        "La transacción expiró antes de confirmarse",
+        "Fallo al conectar con la pasarela de pagos",
+        "Pago rechazado por fondos insuficientes",
     ],
 }
 
+# Lista con los niveles de severidad estándar que presenta un log
+NIVELES = ["INFO", "WARNING", "ERROR", "DEBUG", "CRITICAL"]
 
-def fecha_utc_actual():
-    """Devuelve una fecha ISO-8601 en UTC."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+# Función de simulación de logs para un servicio específico
+def generar_log_falso(nombre_servicio):
 
-
-def generar_log_falso(servicio):
-    """Crea un diccionario con datos simulados de un log."""
+    # Retorna un diccionario con la estructura
     return {
-        "timestamp": fecha_utc_actual(),
-        "service": servicio,
-        "severity": random.choice(SEVERIDADES),
-        "message": random.choice(MENSAJES[servicio]),
+        "timestamp": datetime.now().isoformat(),
+        "service":   nombre_servicio,
+        "severity":  random.choice(NIVELES),
+        "message":   random.choice(MENSAJES_POR_SERVICIO[nombre_servicio]),
     }
 
-
-def enviar_batch(servicio, batch_size):
-    """Genera un lote de logs y lo envia al servidor central."""
-    token = SERVICIOS[servicio]
-    headers = {
-        "Authorization": f"Token {token}",
-        "Content-Type": "application/json",
-    }
-    logs_batch = [generar_log_falso(servicio) for _ in range(batch_size)]
-
-    response = requests.post(URL, json=logs_batch, headers=headers, timeout=10)
-    if response.status_code == 201:
-        data = response.json()
-        print(f"[+] {servicio}: guardados={data.get('stored')} mensaje={data.get('message')}")
+# Función de envío de logs en el que se indica:
+# 1) El servicio (y el mensaje).
+# 2) La cantidad de logs a generarse.
+def enviar_logs(nombre_servicio, cantidad):
+    token = TOKENS.get(nombre_servicio) # --> # Busca el token correspondiente al servicio en el diccionario TOKENS
+    if not token: # Si el servicio no tiene un token definido, avisa por consola y detiene la función
+        print(f"[{nombre_servicio}] No hay token definido para este servicio. Abortando.")
         return
 
-    print(f"[-] {servicio}: error HTTP {response.status_code}: {response.text}")
+    headers = {
+        "Authorization": f"Token {token}", # --> Header de autorización que la API va a validar
+        "Content-Type":  "application/json", # --> Le indicamos a la API que el cuerpo de nuestra petición va a ser un JSON
+    }
 
 
-def iniciar_simulador(servicios, batch_size=10, sleep_time=3, ciclos=1):
-    """Genera logs en lotes para uno o varios servicios."""
-    print(f"Iniciando simulador: servicios={', '.join(servicios)} batch_size={batch_size} ciclos={ciclos}")
+    logs_a_enviar = [generar_log_falso(nombre_servicio) for _ in range(cantidad)]
 
-    for ciclo in range(1, ciclos + 1):
-        print(f"\nCiclo {ciclo}/{ciclos}")
-        for servicio in servicios:
-            try:
-                enviar_batch(servicio, batch_size)
-            except requests.exceptions.ConnectionError:
-                print("[!] El servidor central no responde. Levanta Flask con: python server.py")
-                return
-            except requests.exceptions.Timeout:
-                print("[!] El servidor tardo demasiado en responder.")
-                return
+    print(f"[{nombre_servicio}] Enviando {cantidad} log(s)...")
 
-        if ciclo < ciclos:
-            time.sleep(sleep_time)
+    try:
+        respuesta = requests.post(
+            URL_SERVIDOR, # --> # La URL de destino (http://localhost:6869/logs)
+            json=logs_a_enviar, 
+            headers=headers, # --> El Autorizador y el formato
+            timeout=5,  # Evita que el script quede colgado si el servidor no responde
+        )
 
+        print(f"[{nombre_servicio}] Status: {respuesta.status_code}")
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Simulador de servicios que envian logs por HTTP")
-    parser.add_argument("--service", choices=SERVICIOS.keys(), help="Servicio especifico a simular")
-    parser.add_argument("--all", action="store_true", help="Simula todos los servicios disponibles")
-    parser.add_argument("--batch-size", type=int, default=10, help="Cantidad de logs por request")
-    parser.add_argument("--ciclos", type=int, default=1, help="Cantidad de ciclos de envio")
-    parser.add_argument("--sleep", type=float, default=3, help="Segundos entre ciclos")
-    return parser.parse_args()
+        # Parseamos JSON solo si el servidor realmente devolvió JSON
+        try:
+            print(f"[{nombre_servicio}] Respuesta: {respuesta.json()}")
+        except requests.exceptions.JSONDecodeError:
+            print(f"[{nombre_servicio}] Respuesta no era JSON: {respuesta.text}")
+
+    except requests.exceptions.ConnectionError:
+        print(f"[{nombre_servicio}] No se pudo conectar al servidor. ¿Está corriendo?")
+    except requests.exceptions.Timeout:
+        print(f"[{nombre_servicio}] El servidor tardó demasiado en responder.")
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    servicios = list(SERVICIOS.keys()) if args.all else [args.service or "servicio01"]
-    iniciar_simulador(servicios, batch_size=args.batch_size, sleep_time=args.sleep, ciclos=args.ciclos)
+    # Simulamos los tres servicios enviando distinta cantidad de logs cada uno
+    enviar_logs("Registro",      cantidad=333)
+    enviar_logs("Autenticacion", cantidad=333)
+    enviar_logs("Pagos",         cantidad=333)
