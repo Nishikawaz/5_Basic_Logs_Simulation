@@ -1,16 +1,23 @@
 from flask import Flask, request, jsonify
+import os
 import sqlite3
 from datetime import datetime
 
 # Instancia de la aplicación Flask
 app = Flask(__name__)
 
+# Cada token de servicio queda ATADO al nombre de servicio que tiene permitido escribir.
+# Los valores deben coincidir exactamente con el campo "service" que manda cliente.py:
+# si no coinciden, el servicio no puede publicar ni sus propios logs.
 TOKENS_VALIDOS = {
-    "TOKEN_servicio_A": "Servicio_A", 
-    "TOKEN_servicio_B": "Servicio_B",
-    "TOKEN_servicio_C": "Servicio_C",
-    "Consultas": "consulta"
+    "TOKEN_servicio_A": "Registro",
+    "TOKEN_servicio_B": "Autenticacion",
+    "TOKEN_servicio_C": "Pagos",
+    "Consultas": None,   # None = token de solo lectura, no puede hacer POST
 }
+
+# Campos que un log debe traer sí o sí para ser aceptado
+CAMPOS_REQUERIDOS = ("timestamp", "service", "severity", "message")
 
 # Configuración y conexión de la BD
 def db_connection():
@@ -36,35 +43,66 @@ def inicializar_bd():
     conn.commit()
     conn.close()
 
-# Función de verificación de Token
+# Centinela para distinguir "token invalido" de "token valido de solo lectura".
+# Sin esto, un token de consulta (cuyo servicio es None) sería indistinguible de un token inexistente.
+TOKEN_INVALIDO = object()
+
+# Función de verificación de Token.
+# Devuelve TOKEN_INVALIDO si no autentica; si autentica, devuelve el servicio
+# habilitado a escribir (o None si es un token de solo lectura).
 def verificar_token(auth_header):
-    if not auth_header: # --> Si el header no es de autenticación, tira False
-        return False
+    if not auth_header: # --> Si el header no es de autenticación, no autentica
+        return TOKEN_INVALIDO
     # Divide el contenido del encabezado por el espacio
     partes = auth_header.split(" ")
     # Verifica que haya exactamente 2 partes y que la primera palabra sea exactamente "Token"
     if len(partes) == 2 and partes[0] == "Token":
         # Extrae la segunda parte, que es el token en sí
         token = partes[1]
-        # Retorna True si el token existe como llave en nuestro diccionario TOKENS_VALIDOS, de lo contrario False
-        return token in TOKENS_VALIDOS
-    return False
+        if token in TOKENS_VALIDOS:
+            return TOKENS_VALIDOS[token]
+    return TOKEN_INVALIDO
 
 # Función donde se define un endpoint o ruta en '/logs' que solo acepta peticiones HTTP de tipo POST (para crear/enviar datos)
 @app.route('/logs', methods=['POST'])
 def recibir_logs():
     # Extrae el valor del encabezado 'Authorization' de la petición entrante
     auth_header = request.headers.get('Authorization')
-    if not verificar_token(auth_header): # Llama a la función de verificación. Si da False (no autorizado)...
+    servicio_autorizado = verificar_token(auth_header) # Devuelve el servicio habilitado, None, o TOKEN_INVALIDO
+    if servicio_autorizado is TOKEN_INVALIDO:
         return jsonify({"error": "Quién sos, bro?"}), 401 # Devuelve un json con un mensaje de error y el status code correspondiente (No autorizado)
 
+    # El token autentica, pero es de solo lectura: no puede escribir logs
+    if servicio_autorizado is None:
+        return jsonify({"error": "Este token es de solo lectura"}), 403 # Forbidden
+
     # Parsea la petición como json, si no cumple con la estructura o está vacío...
-    datos = request.get_json()
+    # silent=True evita que un cuerpo malformado levante una excepción y termine en un 500.
+    datos = request.get_json(silent=True)
     if not datos:
         return jsonify({"error": "No enviaste datos JSON"}), 400 # Devuelve un json con error y status code correspondiente (Bad Request)
 
     if isinstance(datos, dict):
         datos = [datos]
+
+    if not isinstance(datos, list):
+        return jsonify({"error": "Se esperaba un objeto JSON o una lista de objetos"}), 400
+
+    # Validación previa: se revisa TODO el lote antes de escribir nada, así un log
+    # inválido no deja la mitad del lote insertada y la otra mitad no.
+    for indice, log in enumerate(datos):
+        if not isinstance(log, dict):
+            return jsonify({"error": f"El elemento {indice} no es un objeto JSON"}), 400
+
+        faltantes = [campo for campo in CAMPOS_REQUERIDOS if not log.get(campo)]
+        if faltantes:
+            return jsonify({"error": f"Al elemento {indice} le faltan campos: {faltantes}"}), 400
+
+        # Un servicio solo puede escribir logs a su propio nombre
+        if log["service"] != servicio_autorizado:
+            return jsonify({
+                "error": f"El token de '{servicio_autorizado}' no puede escribir logs de '{log['service']}'"
+            }), 403
 
     conn = db_connection()
     cursor = conn.cursor()
@@ -76,9 +114,9 @@ def recibir_logs():
     for log in datos:
         cursor.execute(
             'INSERT INTO logs (timestamp, service, severity, message, received_at) VALUES (?, ?, ?, ?, ?)',
-            (log.get('timestamp'), log.get('service'), log.get('severity'), log.get('message'), fecha_recepcion)
+            (log['timestamp'], log['service'], log['severity'], log['message'], fecha_recepcion)
         )
-    
+
     conn.commit()
     conn.close()
 
@@ -89,7 +127,8 @@ def recibir_logs():
 def consultar_logs():
     # Al igual que en POST, leemos el encabezado de autorización
     auth_header = request.headers.get('Authorization') # Lectura del header de autenticación
-    if not verificar_token(auth_header): 
+    # Para leer alcanza con cualquier token válido, sea de servicio o de consulta
+    if verificar_token(auth_header) is TOKEN_INVALIDO:
         return jsonify({"error": "Quién sos, bro?"}), 401 # Devuelve un json con un mensaje de error y el status code correspondiente (No autorizado)
     
     # Se extraen los parámetros de búsqueda de la URL (/logs[?severity]=[XYZ])
@@ -132,4 +171,7 @@ def consultar_logs():
 
 if __name__ == '__main__':
     inicializar_bd()
-    app.run(debug=True, port=6869)
+    # debug se activa solo si se pide explícitamente (FLASK_DEBUG=1). Con debug=True fijo,
+    # el servidor expone una consola interactiva que ejecuta código arbitrario.
+    modo_debug = os.environ.get("FLASK_DEBUG") == "1"
+    app.run(debug=modo_debug, port=6869)
