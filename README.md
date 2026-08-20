@@ -124,11 +124,3 @@ Challenge de APIs REST y persistencia. La consigna pedía un servicio que recibi
 Este proyecto genera los datos que analiza el challenge siguiente ([6_Basic_Logs_Analysis](https://github.com/Nishikawaz/6_Basic_Logs_Analysis)): acá se produce y se ingesta, allá se detecta el incidente.
 
 ---
-
-## Limitaciones conocidas
-
-- **Tokens hardcodeados en el código fuente.** Están escritos en un diccionario dentro de `server.py`. En cualquier escenario real irían en variables de entorno o en un gestor de secretos, y estarían hasheados. Para un challenge local es aceptable; para producción, no.
-- **Sin paginación en `GET /logs`.** Una consulta amplia devuelve todo el resultado en un solo JSON. Con millones de logs eso no termina bien.
-- **Sin índices en la tabla.** Los filtros por `timestamp` y `severity` hacen scan completo. Con 999 filas no se nota; con volumen real haría falta indexar ambas columnas.
-- **El servidor de desarrollo de Flask no es un servidor de producción.** Para exponerlo haría falta un WSGI real (gunicorn, uWSGI) detrás de un proxy.
-- **Sin validación del formato de `timestamp`.** Se exige que el campo esté presente, pero no que sea una fecha ISO válida. Como el filtro por rango compara texto, un formato distinto rompería el orden.
